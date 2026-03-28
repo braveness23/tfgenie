@@ -3,12 +3,13 @@
 tfgenie.py — Terraform HCL generator helper script.
 
 Subcommands (called by Sparky via exec):
-  setup   <resource_type> <resource_name>  — create workdir, write stubs, terraform init
-  import  <workdir> <address> <resource_id> — terraform import
-  plan    <workdir>                         — terraform plan -json, output status + drift summary
-  patch   <workdir> <patch_json>            — apply add/remove patch to main.tf
-  result  <workdir>                         — print final main.tf
-  cleanup <workdir>                         — delete workdir
+  setup   <resource_type> <resource_name> [--base-url <url>]  — create workdir, write stubs, terraform init
+  import  <workdir> <address> <resource_id>  — terraform import
+  show    <workdir>                           — terraform show -json, returns all state attributes
+  plan    <workdir>                           — terraform plan -json, output status + drift summary
+  patch   <workdir> <patch_json>             — apply add/remove patch to main.tf
+  result  <workdir>                          — print final main.tf
+  cleanup <workdir>                          — delete workdir
 """
 
 import json
@@ -23,16 +24,16 @@ import tempfile
 # ---------------------------------------------------------------------------
 
 PROVIDER_SNIPPETS = {
-    "gitlab": """\
+    "aws": """\
 terraform {
   required_providers {
-    gitlab = {
-      source = "gitlabhq/gitlab"
+    aws = {
+      source = "hashicorp/aws"
     }
   }
 }
 
-provider "gitlab" {}
+provider "aws" {}
 """,
     "aws": """\
 terraform {
@@ -84,11 +85,72 @@ provider "github" {}
 }
 
 
+ALL_PROVIDERS = set(list(PROVIDER_SNIPPETS.keys()) + ["gitlab", "google", "azurerm", "github"])
+
+
 def infer_provider(resource_type):
     prefix = resource_type.split("_")[0]
-    if prefix in PROVIDER_SNIPPETS:
+    if prefix in ALL_PROVIDERS:
         return prefix
     return None
+
+
+def build_providers_tf(provider, base_url=None):
+    """Generate providers.tf content, with optional base_url for supported providers."""
+    if provider == "gitlab":
+        base_url_line = f'\n  base_url = "{base_url}"' if base_url else ""
+        return f"""\
+terraform {{
+  required_providers {{
+    gitlab = {{
+      source = "gitlabhq/gitlab"
+    }}
+  }}
+}}
+
+provider "gitlab" {{{base_url_line}
+}}
+"""
+    if provider == "google":
+        return """\
+terraform {
+  required_providers {
+    google = {
+      source = "hashicorp/google"
+    }
+  }
+}
+
+provider "google" {}
+"""
+    if provider == "azurerm":
+        return """\
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }
+  }
+}
+
+provider "azurerm" {
+  features {}
+}
+"""
+    if provider == "github":
+        return """\
+terraform {
+  required_providers {
+    github = {
+      source = "integrations/github"
+    }
+  }
+}
+
+provider "github" {}
+"""
+    return PROVIDER_SNIPPETS.get(provider, "")
 
 
 def run(cmd, cwd=None, capture=False):
@@ -102,12 +164,12 @@ def run(cmd, cwd=None, capture=False):
 # setup
 # ---------------------------------------------------------------------------
 
-def cmd_setup(resource_type, resource_name):
+def cmd_setup(resource_type, resource_name, base_url=None):
     provider = infer_provider(resource_type)
     if provider is None:
         print(json.dumps({
             "error": f"Unknown provider prefix for resource type '{resource_type}'. "
-                     f"Supported: {', '.join(PROVIDER_SNIPPETS.keys())}"
+                     f"Supported: {', '.join(sorted(ALL_PROVIDERS))}"
         }))
         sys.exit(1)
 
@@ -120,7 +182,7 @@ def cmd_setup(resource_type, resource_name):
 
     # Write providers.tf
     with open(os.path.join(workdir, "providers.tf"), "w") as f:
-        f.write(PROVIDER_SNIPPETS[provider])
+        f.write(build_providers_tf(provider, base_url=base_url))
 
     # terraform init (quiet)
     result = run(["terraform", "init", "-no-color"], cwd=workdir, capture=True)
@@ -164,6 +226,40 @@ def cmd_import(workdir, address, resource_id):
     print(json.dumps({
         "status": "ok",
         "output": output,
+    }))
+
+
+# ---------------------------------------------------------------------------
+# show
+# ---------------------------------------------------------------------------
+
+def cmd_show(workdir):
+    result = run(["terraform", "show", "-json"], cwd=workdir, capture=True)
+    if result.returncode != 0:
+        print(json.dumps({
+            "status": "error",
+            "output": result.stderr,
+        }))
+        sys.exit(1)
+
+    try:
+        state = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(json.dumps({"status": "error", "output": "Could not parse terraform show output"}))
+        sys.exit(1)
+
+    # Extract the resource attributes from state
+    attributes = {}
+    try:
+        resources = state.get("values", {}).get("root_module", {}).get("resources", [])
+        if resources:
+            attributes = resources[0].get("values", {})
+    except (KeyError, IndexError):
+        pass
+
+    print(json.dumps({
+        "status": "ok",
+        "attributes": attributes,
     }))
 
 
@@ -242,7 +338,7 @@ def _parse_hcl_body(content, resource_type, resource_name):
 
     header = content[:match.start()]
     body = content[start:end]
-    footer = content[end:]
+    footer = content[end + 1:]  # skip the closing brace (we write it explicitly)
     return header, body, footer
 
 
@@ -363,15 +459,26 @@ def main():
 
     if subcmd == "setup":
         if len(sys.argv) < 4:
-            print("Usage: tfgenie.py setup <resource_type> <resource_name>")
+            print("Usage: tfgenie.py setup <resource_type> <resource_name> [--base-url <url>]")
             sys.exit(1)
-        cmd_setup(sys.argv[2], sys.argv[3])
+        base_url = None
+        if "--base-url" in sys.argv:
+            idx = sys.argv.index("--base-url")
+            if idx + 1 < len(sys.argv):
+                base_url = sys.argv[idx + 1]
+        cmd_setup(sys.argv[2], sys.argv[3], base_url=base_url)
 
     elif subcmd == "import":
         if len(sys.argv) < 5:
             print("Usage: tfgenie.py import <workdir> <address> <resource_id>")
             sys.exit(1)
         cmd_import(sys.argv[2], sys.argv[3], sys.argv[4])
+
+    elif subcmd == "show":
+        if len(sys.argv) < 3:
+            print("Usage: tfgenie.py show <workdir>")
+            sys.exit(1)
+        cmd_show(sys.argv[2])
 
     elif subcmd == "plan":
         if len(sys.argv) < 3:

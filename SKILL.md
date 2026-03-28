@@ -41,6 +41,7 @@ Read `config.json`. Map provider credentials to environment variables before run
 | Provider | config key | env var |
 |---|---|---|
 | gitlab | `providers.gitlab.token` | `GITLAB_TOKEN` |
+| gitlab | `providers.gitlab.base_url` | `GITLAB_BASE_URL` |
 | aws | `providers.aws.access_key` | `AWS_ACCESS_KEY_ID` |
 | aws | `providers.aws.secret_key` | `AWS_SECRET_ACCESS_KEY` |
 | aws | `providers.aws.region` | `AWS_DEFAULT_REGION` |
@@ -59,8 +60,10 @@ If `config.json` doesn't exist or the provider isn't configured, check if the en
 ### 2. Setup
 
 ```
-python3 <skill-dir>/scripts/tfgenie.py setup <resource_type> <resource_name>
+python3 <skill-dir>/scripts/tfgenie.py setup <resource_type> <resource_name> [--base-url <url>]
 ```
+
+For GitLab, if `config.json` has `providers.gitlab.base_url`, append `--base-url <value>` to this command.
 
 Output: JSON with `workdir`. Save this — it's needed for all subsequent calls.
 
@@ -79,7 +82,24 @@ If error: check output for common issues:
 - Auth errors → ask user to check credentials in config.json
 - "Resource not found" → resource may not exist or ID may be wrong
 
-### 4. Plan → AI Patch Loop (max 5 iterations)
+### 4. Seed initial values from state
+
+After import, the stub is empty but terraform state has all the real attribute values. Run:
+
+```
+python3 <skill-dir>/scripts/tfgenie.py show <workdir>
+```
+
+Output: JSON with `attributes` — the full set of attribute values from live state.
+
+Pass the attributes to the diff-parser subagent (same prompt as step 4c below, but with `attributes` JSON instead of plan text). The subagent decides which attributes are user-configurable vs computed and produces the first patch.
+
+Apply the patch:
+```
+python3 <skill-dir>/scripts/tfgenie.py patch <workdir> '<patch_json>'
+```
+
+### 5. Plan → AI Patch Loop (max 5 iterations)
 
 **4a. Run plan:**
 ```
@@ -97,7 +117,7 @@ Spawn a subagent with this exact prompt (fill in `{plan_text}`):
 ---
 **DIFF-PARSER PROMPT:**
 
-You are a Terraform plan analyzer. Your job is to read a `terraform plan` output and produce a JSON patch that will make the plan clean.
+You are a Terraform configuration analyzer. Your job is to read either a `terraform plan` output OR a raw attributes JSON from `terraform show`, and produce a JSON patch of which fields belong in the HCL.
 
 Rules:
 1. **Add** fields that are user-configurable and currently missing from the HCL (shown as changes terraform wants to make).
