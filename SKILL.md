@@ -82,52 +82,61 @@ If error: check output for common issues:
 - Auth errors → ask user to check credentials in config.json
 - "Resource not found" → resource may not exist or ID may be wrong
 
-### 4. Seed initial values from state
+### 4. Get schema — identify required fields
 
-After import, the stub is empty but terraform state has all the real attribute values. Run:
+```
+python3 <skill-dir>/scripts/tfgenie.py schema <workdir> <resource_type>
+```
+
+Output: JSON with `required`, `optional`, `computed_only` field lists.
+
+### 5. Seed only required fields from state
 
 ```
 python3 <skill-dir>/scripts/tfgenie.py show <workdir>
 ```
 
-Output: JSON with `attributes` — the full set of attribute values from live state.
+Output: JSON with `attributes` — full live state values.
 
-Pass the attributes to the diff-parser subagent (same prompt as step 4c below, but with `attributes` JSON instead of plan text). The subagent decides which attributes are user-configurable vs computed and produces the first patch.
+From the `attributes`, extract only the fields listed in `required` from the schema output. Build a patch containing only those fields and apply it:
 
-Apply the patch:
 ```
 python3 <skill-dir>/scripts/tfgenie.py patch <workdir> '<patch_json>'
 ```
 
-### 5. Plan → AI Patch Loop (max 5 iterations)
+**Goal:** The stub now has just enough to make `terraform plan` run — nothing more.
 
-**4a. Run plan:**
+### 6. Plan → AI Patch Loop (max 5 iterations)
+
+This loop produces **minimal HCL** — only fields that differ from provider defaults. Terraform itself is the oracle: if a field is at its default, it won't appear as drift.
+
+**6a. Run plan:**
 ```
 python3 <skill-dir>/scripts/tfgenie.py plan <workdir>
 ```
 
 Output: JSON with `status` ("clean" or "drift"), `plan_text`, `plan_json_messages`.
 
-**4b. If status is "clean" → skip to step 5.**
+**6b. If status is "clean" → skip to step 7.**
 
-**4c. If status is "drift" → call the diff-parser subagent:**
+**6c. If status is "drift" → call the diff-parser subagent:**
 
 Spawn a subagent with this exact prompt (fill in `{plan_text}`):
 
 ---
 **DIFF-PARSER PROMPT:**
 
-You are a Terraform configuration analyzer. Your job is to read either a `terraform plan` output OR a raw attributes JSON from `terraform show`, and produce a JSON patch of which fields belong in the HCL.
+You are a Terraform plan analyzer. Your job is to read a `terraform plan` output and produce a JSON patch of fields to add to the HCL to eliminate the drift.
 
 Rules:
-1. **Add** fields that are user-configurable and currently missing from the HCL (shown as changes terraform wants to make).
-2. **Remove** field names that are computed by Terraform or the cloud provider and should never appear in HCL (things like `id`, `arn`, `etag`, timestamps, fingerprints, internal IDs).
-3. **Skip** fields that are already correct — don't add them again.
-4. For nested blocks (like `tags`, `settings`), include the full nested value in `add`.
-5. If you see a field in the plan that you're unsure about (computed vs configurable), include it in `add` — the next iteration will catch it if it's wrong.
+1. **Add** only fields shown as drift in the plan (fields terraform wants to change). These are non-default values that must be explicitly set.
+2. **Remove** any fields currently in the HCL that are computed-only (shown as known after apply, never user-settable).
+3. **Do not add** fields that are already correct or not shown in the plan — if it's not drifting, it's already at its default and should be omitted.
+4. For nested blocks, include the full nested value.
+5. When unsure whether a drifting field is configurable vs computed, include it — the next iteration will catch it.
 
-Computed fields to always remove (non-exhaustive):
-`id`, `arn`, `owner_id`, `etag`, `checksum`, `created_at`, `updated_at`, `last_modified`, `fingerprint`, `unique_id`, `http_url_to_repo`, `ssh_url_to_repo`, `web_url`, `runners_token`, `request_access_enabled` (if shown as computed)
+Computed fields to always remove if present:
+`id`, `arn`, `owner_id`, `etag`, `checksum`, `created_at`, `updated_at`, `last_modified`, `fingerprint`, `unique_id`, `http_url_to_repo`, `ssh_url_to_repo`, `web_url`, `runners_token`
 
 Provider-specific fields to skip (known to cause plan errors when set alone):
 - `mirror` (gitlab_project) — requires `import_url` alongside it; omit unless actually mirroring
@@ -140,7 +149,7 @@ Output ONLY valid JSON in this exact format — no explanation, no markdown:
     "another_field": 42,
     "tags": { "Name": "example" }
   },
-  "remove": ["id", "arn", "computed_field"]
+  "remove": ["computed_field"]
 }
 ```
 
@@ -150,16 +159,14 @@ Here is the terraform plan output:
 
 ---
 
-**4d. Apply the patch:**
+**6d. Apply the patch:**
 ```
 python3 <skill-dir>/scripts/tfgenie.py patch <workdir> '<patch_json>'
 ```
 
-Where `<patch_json>` is the JSON output from the subagent.
+**6e. Go back to 6a.** Repeat up to 5 total iterations.
 
-**4e. Go back to 4a.** Repeat up to 5 total iterations.
-
-**If still not clean after 5 iterations:** Proceed to step 5 anyway, but warn the user that the HCL may need manual adjustment. Show them the remaining plan drift.
+**If still not clean after 5 iterations:** Proceed anyway, warn the user the HCL may need manual adjustment, show them the remaining drift.
 
 ### 5. Output result
 

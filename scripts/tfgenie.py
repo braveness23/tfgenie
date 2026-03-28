@@ -5,6 +5,7 @@ tfgenie.py — Terraform HCL generator helper script.
 Subcommands (called by Sparky via exec):
   setup   <resource_type> <resource_name> [--base-url <url>]  — create workdir, write stubs, terraform init
   import  <workdir> <address> <resource_id>  — terraform import
+  schema  <workdir> <resource_type>          — get provider schema: required/optional/computed fields
   show    <workdir>                           — terraform show -json, returns all state attributes
   plan    <workdir>                           — terraform plan -json, output status + drift summary
   patch   <workdir> <patch_json>             — apply add/remove patch to main.tf
@@ -226,6 +227,66 @@ def cmd_import(workdir, address, resource_id):
     print(json.dumps({
         "status": "ok",
         "output": output,
+    }))
+
+
+# ---------------------------------------------------------------------------
+# schema
+# ---------------------------------------------------------------------------
+
+def cmd_schema(workdir, resource_type):
+    result = run(["terraform", "providers", "schema", "-json"], cwd=workdir, capture=True)
+    if result.returncode != 0:
+        print(json.dumps({"status": "error", "output": result.stderr}))
+        sys.exit(1)
+
+    try:
+        schema_data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(json.dumps({"status": "error", "output": "Could not parse schema JSON"}))
+        sys.exit(1)
+
+    # Find the resource schema — search all provider schemas
+    resource_schema = None
+    for provider_schema in schema_data.get("provider_schemas", {}).values():
+        resources = provider_schema.get("resource_schemas", {})
+        if resource_type in resources:
+            resource_schema = resources[resource_type]
+            break
+
+    if resource_schema is None:
+        print(json.dumps({"status": "error", "output": f"Resource type '{resource_type}' not found in schema"}))
+        sys.exit(1)
+
+    attributes = resource_schema.get("block", {}).get("attributes", {})
+    block_types = resource_schema.get("block", {}).get("block_types", {})
+
+    required = []
+    optional = []
+    computed_only = []
+
+    for name, attr in attributes.items():
+        is_required = attr.get("required", False)
+        is_optional = attr.get("optional", False)
+        is_computed = attr.get("computed", False)
+
+        if is_required:
+            required.append(name)
+        elif is_computed and not is_optional:
+            computed_only.append(name)
+        else:
+            optional.append(name)
+
+    # Block types (nested blocks) are always optional
+    for name in block_types:
+        optional.append(name)
+
+    print(json.dumps({
+        "status": "ok",
+        "resource_type": resource_type,
+        "required": sorted(required),
+        "optional": sorted(optional),
+        "computed_only": sorted(computed_only),
     }))
 
 
@@ -473,6 +534,12 @@ def main():
             print("Usage: tfgenie.py import <workdir> <address> <resource_id>")
             sys.exit(1)
         cmd_import(sys.argv[2], sys.argv[3], sys.argv[4])
+
+    elif subcmd == "schema":
+        if len(sys.argv) < 4:
+            print("Usage: tfgenie.py schema <workdir> <resource_type>")
+            sys.exit(1)
+        cmd_schema(sys.argv[2], sys.argv[3])
 
     elif subcmd == "show":
         if len(sys.argv) < 3:
