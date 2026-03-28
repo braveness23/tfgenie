@@ -129,6 +129,9 @@ Rules:
 Computed fields to always remove (non-exhaustive):
 `id`, `arn`, `owner_id`, `etag`, `checksum`, `created_at`, `updated_at`, `last_modified`, `fingerprint`, `unique_id`, `http_url_to_repo`, `ssh_url_to_repo`, `web_url`, `runners_token`, `request_access_enabled` (if shown as computed)
 
+Provider-specific fields to skip (known to cause plan errors when set alone):
+- `mirror` (gitlab_project) — requires `import_url` alongside it; omit unless actually mirroring
+
 Output ONLY valid JSON in this exact format — no explanation, no markdown:
 ```json
 {
