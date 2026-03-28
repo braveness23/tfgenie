@@ -154,6 +154,22 @@ provider "github" {}
     return PROVIDER_SNIPPETS.get(provider, "")
 
 
+# ---------------------------------------------------------------------------
+# Functionally-required fields per resource type
+# These are schema-optional but must be explicitly set for correct recreation.
+# They won't show as plan drift because terraform already has them in state.
+# ---------------------------------------------------------------------------
+
+FUNCTIONALLY_REQUIRED = {
+    "gitlab_project": ["namespace_id"],
+    "aws_instance": ["ami", "instance_type", "subnet_id"],
+    "aws_s3_bucket": ["bucket"],
+    "aws_security_group": ["vpc_id"],
+    "aws_db_instance": ["allocated_storage", "engine", "instance_class", "username", "db_subnet_group_name"],
+    "github_repository": ["name"],
+}
+
+
 def run(cmd, cwd=None, capture=False):
     result = subprocess.run(
         cmd, cwd=cwd, capture_output=capture, text=True
@@ -281,10 +297,14 @@ def cmd_schema(workdir, resource_type):
     for name in block_types:
         optional.append(name)
 
+    # Add functionally-required fields (schema-optional but needed for correct recreation)
+    functional = FUNCTIONALLY_REQUIRED.get(resource_type, [])
+
     print(json.dumps({
         "status": "ok",
         "resource_type": resource_type,
         "required": sorted(required),
+        "functional": functional,
         "optional": sorted(optional),
         "computed_only": sorted(computed_only),
     }))

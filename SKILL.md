@@ -90,7 +90,7 @@ python3 <skill-dir>/scripts/tfgenie.py schema <workdir> <resource_type>
 
 Output: JSON with `required`, `optional`, `computed_only` field lists.
 
-### 5. Seed only required fields from state
+### 5. Seed required + functional fields from state
 
 ```
 python3 <skill-dir>/scripts/tfgenie.py show <workdir>
@@ -98,13 +98,16 @@ python3 <skill-dir>/scripts/tfgenie.py show <workdir>
 
 Output: JSON with `attributes` — full live state values.
 
-From the `attributes`, extract only the fields listed in `required` from the schema output. Build a patch containing only those fields and apply it:
+From `attributes`, extract fields listed in **both** `required` and `functional` from the schema output. Build a patch containing those fields and apply it:
 
 ```
 python3 <skill-dir>/scripts/tfgenie.py patch <workdir> '<patch_json>'
 ```
 
-**Goal:** The stub now has just enough to make `terraform plan` run — nothing more.
+**`required`** — schema-required; plan will error without them.
+**`functional`** — schema-optional but needed for correct recreation (e.g. `namespace_id` on a GitLab project — omitting it would recreate the project in the wrong namespace).
+
+**Goal:** The stub has just enough to plan correctly and recreate the resource in the right place.
 
 ### 6. Plan → AI Patch Loop (max 5 iterations)
 
